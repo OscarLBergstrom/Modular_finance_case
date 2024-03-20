@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"bytes"
+	"sync"
 )
 
 type subscriber struct {
@@ -19,8 +20,7 @@ type subscriber struct {
 	secret      string
 	topic       string
 }
-
-var subscribers []subscriber
+var verifiedSubscribersMutex sync.Mutex
 var verifiedSubscribers []subscriber
 
 func getSubscriberRequest(w http.ResponseWriter, r *http.Request) {
@@ -31,6 +31,7 @@ func getSubscriberRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bodyBytes, err := readRequestBody(r)
+	
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -54,8 +55,6 @@ func getSubscriberRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Append to subscribers
 	newSubscriber := subscriber{callbackURL: callbackURL, secret: secret, topic: topic}
-	subscribers = append(subscribers, newSubscriber)
-
 	// verify subscriber asynchronously
 	go verifySubscriber(newSubscriber)
 
@@ -86,18 +85,21 @@ func verifySubscriber(sub subscriber) {
 	}
 	defer resp.Body.Close()
 
+
+	// The subscriber echos back the challenge
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Error reading response from subscriber %s: %v", sub.callbackURL, err)
 		return
 	}
-	log.Println("BOOOODY", string(body))
-	// The subscriber is supposed to echo back the challenge
+	
 	if string(body) != challenge {
 		log.Printf("Verification failed for subscriber: %s", sub.callbackURL)
 	} else {
 		log.Printf("Subscriber verified: %s", sub.callbackURL)
+		verifiedSubscribersMutex.Lock()
 		verifiedSubscribers = append(verifiedSubscribers, sub)
+		verifiedSubscribersMutex.Unlock()
 		log.Printf("VERIFIED SUBSCRIBERS", verifiedSubscribers)
 	}
 	
@@ -172,8 +174,9 @@ func fetchSubscriberLogs() {
 		log.Printf("Error reading subscriber logs response body: %v", err)
 		return
 	}
-
+	log.Println("___________")
 	log.Printf("Subscriber logs:\n%s", string(body))
+	log.Println("___________")
 }
 
 func publishContent(w http.ResponseWriter, r *http.Request) {
@@ -194,13 +197,22 @@ func publishContent(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+	verifiedSubscribersMutex.Lock()
+
+	verifiedSubsCopy:= make([]subscriber, len(verifiedSubscribers))
+	copy(verifiedSubsCopy, verifiedSubscribers)
+	
+	verifiedSubscribersMutex.Unlock()
+
     // Iterate over all verified subscribers and send them the signed content
-    for _, sub := range verifiedSubscribers {
-        signature := createSignature(sub.secret, string(jsonData))
-        sendSignedContent(sub, jsonData, signature)
+    for _, sub := range verifiedSubsCopy {
+		go func (sub subscriber)  {
+			signature := createSignature(sub.secret, string(jsonData))
+			sendSignedContent(sub, jsonData, signature)
+		}(sub)	
     }
 
-    fmt.Fprintf(w, "Content published to %d verified subscribers.\n", len(verifiedSubscribers))
+    fmt.Fprintf(w, "Content published to %d verified subscribers.\n", len(verifiedSubsCopy))
 }
 
 func sendSignedContent(sub subscriber, jsonData []byte, signature string) {
