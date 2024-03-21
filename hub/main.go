@@ -30,14 +30,7 @@ func getSubscriberRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bodyBytes, err := readRequestBody(r)
-	
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	bodyParsed, err := parseRequestBody(bodyBytes)
+	bodyParsed, err := parseRequestBody(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -48,18 +41,16 @@ func getSubscriberRequest(w http.ResponseWriter, r *http.Request) {
 	topic := bodyParsed.Get("hub.topic")
 
 	// Validate parsed data
-	if callbackURL == "" || topic == "" {
-		http.Error(w, "Missing callback URL or topic", http.StatusBadRequest)
+	if callbackURL == "" || topic == "" || secret == "" {
+		http.Error(w, "Missing subscriber data", http.StatusBadRequest)
 		return
 	}
 
-	// Append to subscribers
 	newSubscriber := subscriber{callbackURL: callbackURL, secret: secret, topic: topic}
-	// verify subscriber asynchronously
-	go verifySubscriber(newSubscriber)
 
-	log.Printf("Subscriber added: %+v", newSubscriber)
 	fmt.Fprint(w, "Subscription request received.")
+	 
+	verifySubscriber(newSubscriber)
 }
 
 func verifySubscriber(sub subscriber) {
@@ -100,9 +91,27 @@ func verifySubscriber(sub subscriber) {
 		verifiedSubscribersMutex.Lock()
 		verifiedSubscribers = append(verifiedSubscribers, sub)
 		verifiedSubscribersMutex.Unlock()
-		log.Printf("VERIFIED SUBSCRIBERS", verifiedSubscribers)
 	}
 	
+}
+
+func parseRequestBody(r *http.Request) (url.Values, error) {
+    // Read the body directly from the http.Request object
+    bodyBytes, err := ioutil.ReadAll(r.Body)
+    if err != nil {
+        return nil, fmt.Errorf("can't read body: %v", err)
+    }
+    defer r.Body.Close()
+
+    // Convert the body to a string and then parse it as URL-encoded data
+	bodyString := string(bodyBytes)
+    bodyParsed, err := url.ParseQuery(bodyString)
+
+    if err != nil {
+        return nil, fmt.Errorf("can't parse body: %v", err)
+    }
+
+    return bodyParsed, nil
 }
 
 func generateRandomString(n int) (string, error) {
@@ -111,72 +120,6 @@ func generateRandomString(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
-}
-
-func createSignature(secret string, message string) string{
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(message))
-	signature := mac.Sum(nil)
-	
-	return hex.EncodeToString(signature)
-}
-
-func readRequestBody(r *http.Request) ([]byte, error) {
-	bodyBytes, err := ioutil.ReadAll(r.Body)
-	defer r.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("can't read body: %v", err)
-	}
-
-	return bodyBytes, nil
-}
-
-func parseRequestBody(bodyBytes []byte) (url.Values, error) {
-	bodyString := string(bodyBytes)
-	bodyParsed, err := url.ParseQuery(bodyString)
-	if err != nil {
-		return nil, fmt.Errorf("can't parse body: %v", err)
-	}
-
-	return bodyParsed, nil
-}
-
-func initiateSubscriptionDance(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-        return
-    }
-
-	resp, err := http.Get("http://web-sub-client:8080" +"/resub")
-	if err != nil {
-		log.Printf("Error initiating subscription dance: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		log.Println("Subscription dance initiated successfully.")
-	} else {
-		log.Printf("Failed to initiate subscription dance, status code: %d", resp.StatusCode)
-	}
-}
-
-func fetchSubscriberLogs() {
-	resp, err := http.Get("http://web-sub-client:8080" + "/log")
-	if err != nil {
-		log.Printf("Error fetching subscriber logs: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Error reading subscriber logs response body: %v", err)
-		return
-	}
-	log.Println("___________")
-	log.Printf("Subscriber logs:\n%s", string(body))
-	log.Println("___________")
 }
 
 func publishContent(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +184,51 @@ func sendSignedContent(sub subscriber, jsonData []byte, signature string) {
 	fetchSubscriberLogs()
 }
 
+func createSignature(secret string, message string) string{
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(message))
+	signature := mac.Sum(nil)
+	
+	return hex.EncodeToString(signature)
+}
+
+func initiateSubscriptionDance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+	resp, err := http.Get("http://web-sub-client:8080" +"/resub")
+	if err != nil {
+		log.Printf("Error initiating subscription dance: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		log.Println("Subscription dance initiated successfully.")
+	} else {
+		log.Printf("Failed to initiate subscription dance, status code: %d", resp.StatusCode)
+	}
+}
+
+func fetchSubscriberLogs() {
+	resp, err := http.Get("http://web-sub-client:8080" + "/log")
+	if err != nil {
+		log.Printf("Error fetching subscriber logs: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading subscriber logs response body: %v", err)
+		return
+	}
+	log.Println("___________")
+	log.Printf("Subscriber logs:\n%s", string(body))
+	log.Println("___________")
+}
 
 func main() {
 	http.HandleFunc("/", getSubscriberRequest)
